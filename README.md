@@ -144,7 +144,7 @@ Helpers live under `scripts/lib/` and are not meant to be invoked directly.
 
 | Script | Purpose |
 |--|--|
-| `deploy.py` | Renders `awg-in.conf` on the controller, copies artifacts, builds the image, starts the container (always `--force-recreate`) |
+| `deploy.py` | Renders `awg-in.conf` on the controller, copies artifacts, builds the image, starts the container (always `--force-recreate`). With `FORTI_ENABLED=true`, then runs Forti SAML on `127.0.0.1:FORTI_SAML_PORT` |
 | `restart.py` | `docker compose restart` on the server |
 | `status.py` | Healthcheck inside the container (xray / awg-in / tunnels) |
 | `logs.py` | Container logs |
@@ -153,19 +153,21 @@ Helpers live under `scripts/lib/` and are not meant to be invoked directly.
 Useful `deploy` flags:
 
 - `--check` — Ansible check mode (no changes on the server).
+- `--skip-forti` — skip post-deploy Forti SAML login.
+- `--no-browser` / `--timeout N` — same meaning as `forti_reconnect.py` (deploy default timeout 120s).
 
 ### Forti / Cisco
 
 | Script | Purpose |
 |--|--|
-| `forti_reconnect.py` | Kills `openfortivpn` in the container (restart loop brings it back), then browser SAML on `127.0.0.1:FORTI_SAML_PORT`. Use after deploy and whenever the Forti session dies. Other tunnels untouched |
+| `forti_reconnect.py` | Kills `openfortivpn` in the container (restart loop brings it back), then browser SAML on `127.0.0.1:FORTI_SAML_PORT`. Use whenever the Forti session dies after deploy. Other tunnels untouched |
 | `cisco_reconnect.py` | Kills `openconnect`; restart loop reconnects with password+TOTP. Waits for `cisco0` |
 
 Flags: `--no-browser` (Forti), `--timeout N` (default 60s for Forti).
 
 Forti requires browser SSO — password+OTP via `/remote/logincheck` is not
-supported here. After `deploy` with `FORTI_ENABLED=true`, run
-`forti_reconnect.py` once to complete SAML.
+supported here. `deploy.py` runs SAML automatically when `FORTI_ENABLED=true`
+(unless `--skip-forti` / `--check`).
 
 ### Inbound AWG users
 
