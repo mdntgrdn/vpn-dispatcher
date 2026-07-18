@@ -10,3 +10,4 @@ __pycache__/
 clients/
 secrets/
 data/
+.idea
