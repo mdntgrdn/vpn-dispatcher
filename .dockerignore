@@ -1,0 +1,14 @@
+.venv
+.runtime
+clients
+data
+secrets
+__pycache__
+*.py[cod]
+.git
+ansible
+ansible.cfg
+README.md
+pyproject.toml
+poetry.lock
+scripts

@@ -1,0 +1,135 @@
+---
+# Client ops. Invoked from local scripts/*_clients.py.
+# Same idea as the main repo: Ansible only runs docker/copy on the server;
+# registry merge and conf rendering happen on the controller.
+- name: Manage inbound AWG users
+  hosts: vpn_dispatcher_target
+  gather_facts: false
+  vars:
+    deploy_path: "{{ lookup('env', 'DEPLOY_PATH') | default('/opt/vpn-dispatcher', true) }}"
+    container_name: "{{ lookup('env', 'CONTAINER_NAME') | default('vpn-dispatcher', true) }}"
+    awg_data: "{{ deploy_path }}/data/awg"
+    awg_clients_dir: "{{ deploy_path }}/data/clients"
+    awg_interface: awg-in
+  tasks:
+    - name: Validate client operation
+      ansible.builtin.assert:
+        that:
+          - client_action in ["fetch", "keygen", "apply_add", "apply_remove"]
+
+    - name: Ensure client data directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ awg_data }}"
+        - "{{ awg_clients_dir }}"
+
+    - name: Read inbound server state
+      ansible.builtin.slurp:
+        src: "{{ awg_data }}/server.yml"
+      register: server_state_slurp
+      when: client_action == "fetch"
+
+    - name: Stat client registry
+      ansible.builtin.stat:
+        path: "{{ awg_data }}/clients.yml"
+      register: clients_registry_stat
+      when: client_action == "fetch"
+
+    - name: Read client registry
+      ansible.builtin.slurp:
+        src: "{{ awg_data }}/clients.yml"
+      register: clients_registry_slurp
+      when:
+        - client_action == "fetch"
+        - clients_registry_stat.stat.exists | default(false)
+
+    - name: Write fetch payload for the controller
+      ansible.builtin.copy:
+        dest: "{{ client_result_file }}"
+        mode: "0600"
+        content: >-
+          {{
+            {
+              'server': server_state_slurp.content | b64decode | from_yaml,
+              'clients': (
+                (clients_registry_slurp.content | b64decode | from_yaml).clients
+                if (clients_registry_stat.stat.exists | default(false))
+                else []
+              )
+            } | to_nice_json
+          }}
+      delegate_to: localhost
+      become: false
+      when: client_action == "fetch"
+
+    - name: Generate AWG client key pairs
+      ansible.builtin.shell: |
+        set -eu
+        {% for name in client_names %}
+        priv="$(docker exec "{{ container_name }}" awg genkey)"
+        pub="$(printf '%s' "$priv" | docker exec -i "{{ container_name }}" awg pubkey)"
+        printf '%s\t%s\t%s\n' {{ name | quote }} "$priv" "$pub"
+        {% endfor %}
+      args:
+        executable: /bin/bash
+      register: keygen_batch
+      no_log: true
+      when: client_action == "keygen"
+
+    - name: Write keygen payload for the controller
+      ansible.builtin.copy:
+        dest: "{{ client_result_file }}"
+        mode: "0600"
+        content: "{{ keygen_batch.stdout }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      when: client_action == "keygen"
+
+    - name: Write updated client registry
+      ansible.builtin.copy:
+        content: "{{ client_registry_yaml }}"
+        dest: "{{ awg_data }}/clients.yml"
+        mode: "0600"
+      no_log: true
+      when: client_action in ["apply_add", "apply_remove"]
+
+    - name: Install controller-rendered awg-in.conf
+      ansible.builtin.copy:
+        content: "{{ awg_in_conf }}"
+        dest: "{{ awg_data }}/awg-in.conf"
+        mode: "0600"
+      no_log: true
+      when:
+        - client_action in ["apply_add", "apply_remove"]
+        - awg_in_conf is defined
+
+    - name: Write client config files
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ awg_clients_dir }}/{{ item.slug }}.conf"
+        mode: "0600"
+      loop: "{{ client_conf_files | default([]) }}"
+      no_log: true
+      when: client_action == "apply_add"
+
+    - name: Sync peers into awg-in without interface restart
+      ansible.builtin.shell: |
+        set -eu
+        docker exec "{{ container_name }}" \
+          sh -c 'awg-quick strip /data/awg/awg-in.conf | awg syncconf awg-in /dev/stdin'
+      args:
+        executable: /bin/bash
+      when:
+        - client_action in ["apply_add", "apply_remove"]
+        - awg_in_conf is defined
+
+    - name: Delete removed client config files
+      ansible.builtin.file:
+        path: "{{ awg_clients_dir }}/{{ item.slug }}.conf"
+        state: absent
+      loop: "{{ client_peers | default([]) }}"
+      when: client_action == "apply_remove"

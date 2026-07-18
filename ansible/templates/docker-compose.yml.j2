@@ -1,0 +1,43 @@
+services:
+  vpn-dispatcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${DOCKER_IMAGE:-vpn-dispatcher:local}
+    container_name: ${CONTAINER_NAME:-vpn-dispatcher}
+    restart: unless-stopped
+{% if host_network %}
+    network_mode: host
+{% endif %}
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+      - /dev/ppp:/dev/ppp
+{% if not host_network %}
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv4.conf.all.src_valid_mark: "1"
+      net.ipv4.conf.all.route_localnet: "1"
+      net.ipv4.conf.lo.route_localnet: "1"
+    ports:
+      - "${AWG_LISTEN_PORT:-51820}:${AWG_LISTEN_PORT:-51820}/udp"
+      - "${FORTI_SAML_PORT:-8020}:${FORTI_SAML_PROXY_PORT:-18020}/tcp"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+{% endif %}
+    env_file:
+      - .env.runtime
+    environment:
+      PAVEL_WORK_CONTAINER: "1"
+      HOST_NETWORK: "{{ '1' if host_network else '0' }}"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./data:/data
+      - ./secrets:/run/vpn-dispatcher-secrets:ro
+    healthcheck:
+      test: ["CMD", "python3", "/app/container/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

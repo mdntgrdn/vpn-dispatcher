@@ -1,0 +1,93 @@
+---
+- name: Operate VPN dispatcher gateway
+  hosts: vpn_dispatcher_target
+  gather_facts: false
+  vars:
+    deploy_path: "{{ lookup('env', 'DEPLOY_PATH') | default('/opt/vpn-dispatcher', true) }}"
+    container_name: "{{ lookup('env', 'CONTAINER_NAME') | default('vpn-dispatcher', true) }}"
+    docker_image: "{{ lookup('env', 'DOCKER_IMAGE') | default('vpn-dispatcher:local', true) }}"
+    host_network: "{{ (lookup('env', 'HOST_NETWORK') | default('true', true) | lower) in ['1', 'true', 'yes', 'on'] }}"
+  tasks:
+    - name: Validate operation
+      ansible.builtin.assert:
+        that:
+          - operation in ["destroy", "status", "logs", "restart"]
+
+    - name: Bring down inbound AWG (run PostDown hooks)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        conf=/data/awg/awg-in.conf
+        host_conf="{{ deploy_path }}/data/awg/awg-in.conf"
+        running=false
+        if docker inspect -f '{% raw %}{{.State.Running}}{% endraw %}' "{{ container_name }}" 2>/dev/null | grep -qx true; then
+          running=true
+        fi
+        if [ "$running" = true ]; then
+          echo "Running awg-quick down inside {{ container_name }}"
+          docker exec "{{ container_name }}" awg-quick down "$conf" || true
+        elif [ "{{ host_network | bool }}" = "True" ] && [ -f "$host_conf" ]; then
+          # Container already stopped; PostDown must still run in the host netns.
+          image="$(docker inspect -f '{% raw %}{{.Config.Image}}{% endraw %}' "{{ container_name }}" 2>/dev/null || true)"
+          if [ -z "$image" ]; then
+            image="{{ docker_image }}"
+          fi
+          echo "Running awg-quick down via one-shot container ($image, host network)"
+          docker run --rm --network host --cap-add NET_ADMIN \
+            --device /dev/net/tun:/dev/net/tun \
+            -v "{{ deploy_path }}/data:/data" \
+            "$image" awg-quick down "$conf" || true
+        else
+          echo "Skipping awg-quick down (container not running / no conf)"
+        fi
+      args:
+        executable: /bin/bash
+      when: operation == "destroy"
+
+    - name: Stop gateway
+      ansible.builtin.shell: |
+        if docker compose version >/dev/null 2>&1; then
+          docker compose down
+        else
+          docker-compose down
+        fi
+      args:
+        chdir: "{{ deploy_path }}"
+        executable: /bin/bash
+      when: operation == "destroy"
+
+    - name: Restart gateway containers
+      ansible.builtin.shell: |
+        if docker compose version >/dev/null 2>&1; then
+          docker compose restart
+        else
+          docker-compose restart
+        fi
+      args:
+        chdir: "{{ deploy_path }}"
+        executable: /bin/bash
+      register: operation_result
+      when: operation == "restart"
+
+    - name: Query gateway status
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ container_name }}", python3, /app/container/healthcheck.py, --verbose]
+      register: operation_result
+      changed_when: false
+      when: operation == "status"
+
+    - name: Read gateway logs
+      ansible.builtin.command:
+        argv: [docker, logs, --tail, "200", "{{ container_name }}"]
+      register: operation_result
+      changed_when: false
+      when: operation == "logs"
+
+    - name: Print command output
+      ansible.builtin.debug:
+        var: operation_result.stdout_lines
+      when: operation in ["status", "logs"]
+
+    - name: Print restart result
+      ansible.builtin.debug:
+        msg: "{{ operation_result.stdout | default('restarted', true) }}"
+      when: operation == "restart"

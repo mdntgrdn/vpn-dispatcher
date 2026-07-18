@@ -1,0 +1,95 @@
+---
+# Bootstrap / fetch inbound AWG state for controller-side conf rendering.
+# Creates data/awg/server.key on the host if missing (wireguard-tools).
+- name: Prepare inbound AWG state for the controller
+  hosts: vpn_dispatcher_target
+  gather_facts: false
+  vars:
+    deploy_path: "{{ lookup('env', 'DEPLOY_PATH') | default('/opt/vpn-dispatcher', true) }}"
+    awg_data: "{{ deploy_path }}/data/awg"
+  tasks:
+    - name: Ensure awg data directory
+      ansible.builtin.file:
+        path: "{{ awg_data }}"
+        state: directory
+        mode: "0700"
+
+    - name: Install wireguard-tools for keygen/pubkey
+      ansible.builtin.apt:
+        name: wireguard-tools
+        state: present
+        update_cache: true
+
+    - name: Check for existing server private key
+      ansible.builtin.stat:
+        path: "{{ awg_data }}/server.key"
+      register: server_key_stat
+
+    - name: Generate server private key on the host when missing
+      ansible.builtin.shell: |
+        set -eu
+        umask 077
+        wg genkey > "{{ awg_data }}/server.key"
+        chmod 600 "{{ awg_data }}/server.key"
+      args:
+        executable: /bin/bash
+      when: not server_key_stat.stat.exists
+
+    - name: Read server private key
+      ansible.builtin.slurp:
+        src: "{{ awg_data }}/server.key"
+      register: server_key_slurp
+
+    - name: Derive server public key on the host
+      ansible.builtin.shell: |
+        set -eu
+        wg pubkey < "{{ awg_data }}/server.key"
+      args:
+        executable: /bin/bash
+      register: server_pubkey
+      changed_when: false
+
+    - name: Stat server.yml
+      ansible.builtin.stat:
+        path: "{{ awg_data }}/server.yml"
+      register: server_yml_stat
+
+    - name: Read server.yml
+      ansible.builtin.slurp:
+        src: "{{ awg_data }}/server.yml"
+      register: server_yml_slurp
+      when: server_yml_stat.stat.exists
+
+    - name: Stat clients.yml
+      ansible.builtin.stat:
+        path: "{{ awg_data }}/clients.yml"
+      register: clients_yml_stat
+
+    - name: Read clients.yml
+      ansible.builtin.slurp:
+        src: "{{ awg_data }}/clients.yml"
+      register: clients_yml_slurp
+      when: clients_yml_stat.stat.exists
+
+    - name: Write prepare payload for the controller
+      ansible.builtin.copy:
+        dest: "{{ awg_result_file }}"
+        mode: "0600"
+        content: >-
+          {{
+            {
+              'private_key': server_key_slurp.content | b64decode | trim,
+              'public_key': server_pubkey.stdout | trim,
+              'server': (
+                server_yml_slurp.content | b64decode | from_yaml
+                if server_yml_stat.stat.exists else {}
+              ),
+              'clients': (
+                (clients_yml_slurp.content | b64decode | from_yaml).clients
+                if clients_yml_stat.stat.exists else []
+              )
+            } | to_nice_json
+          }}
+      delegate_to: localhost
+      become: false
+      no_log: true

@@ -1,0 +1,192 @@
+---
+- name: Deploy VPN dispatcher gateway
+  hosts: vpn_dispatcher_target
+  gather_facts: true
+  vars:
+    deploy_path: "{{ lookup('env', 'DEPLOY_PATH') | default('/opt/vpn-dispatcher', true) }}"
+    host_network: "{{ (lookup('env', 'HOST_NETWORK') | default('true', true) | lower) in ['1', 'true', 'yes', 'on'] }}"
+  tasks:
+    - name: Require a Debian-family target
+      ansible.builtin.assert:
+        that:
+          - ansible_facts["os_family"] == "Debian"
+        fail_msg: "The initial installer supports Debian and Ubuntu servers."
+
+    - name: Check whether Docker is already installed
+      ansible.builtin.command: docker version
+      register: docker_cli
+      changed_when: false
+      failed_when: false
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - kmod
+          - python3
+        state: present
+        update_cache: true
+
+    - name: Install Docker from distro packages
+      ansible.builtin.apt:
+        name:
+          - docker.io
+        state: present
+      when: docker_cli.rc != 0
+
+    - name: Ensure Docker service is running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Check Docker Compose v2
+      ansible.builtin.command: docker compose version
+      register: compose_v2
+      changed_when: false
+      failed_when: false
+
+    - name: Install a Docker Compose package
+      ansible.builtin.shell: |
+        set -eu
+        apt-get install -y docker-compose-v2 \
+          || apt-get install -y docker-compose-plugin \
+          || apt-get install -y docker-compose
+      args:
+        executable: /bin/bash
+      when: compose_v2.rc != 0
+
+    - name: Detect available Compose command
+      ansible.builtin.shell: |
+        if docker compose version >/dev/null 2>&1; then
+          printf '%s' 'docker compose'
+        elif docker-compose version >/dev/null 2>&1; then
+          printf '%s' 'docker-compose'
+        else
+          exit 1
+        fi
+      args:
+        executable: /bin/bash
+      register: compose_command_result
+      changed_when: false
+
+    - name: Load required network kernel modules
+      ansible.builtin.command:
+        argv: [modprobe, "{{ item }}"]
+      changed_when: false
+      loop:
+        - tun
+        - ppp_generic
+        - wireguard
+        - nft_tproxy
+        - nf_tproxy_ipv4
+
+    - name: Load required modules after reboot
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/vpn-dispatcher.conf
+        mode: "0644"
+        content: |
+          tun
+          ppp_generic
+          wireguard
+          nft_tproxy
+          nf_tproxy_ipv4
+
+    - name: Check PPP device
+      ansible.builtin.stat:
+        path: /dev/ppp
+      register: ppp_device
+
+    - name: Create PPP device
+      ansible.builtin.command:
+        argv: [mknod, /dev/ppp, c, "108", "0"]
+      when: not ppp_device.stat.exists
+
+    - name: Create deployment directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: "{{ deploy_path }}", mode: "0755"}
+        - {path: "{{ deploy_path }}/data", mode: "0700"}
+        - {path: "{{ deploy_path }}/data/awg", mode: "0700"}
+        - {path: "{{ deploy_path }}/secrets", mode: "0700"}
+
+    - name: Require controller-rendered awg-in.conf
+      ansible.builtin.assert:
+        that:
+          - awg_in_conf is defined
+          - awg_in_conf | length > 0
+          - awg_server_yml is defined
+          - awg_server_key is defined
+        fail_msg: >-
+          awg-in.conf must be rendered on the controller before deploy
+          (scripts.lib.render_awg_in).
+
+    - name: Install controller-rendered inbound AWG artifacts
+      ansible.builtin.copy:
+        content: "{{ item.content }}"
+        dest: "{{ deploy_path }}/data/awg/{{ item.name }}"
+        mode: "0600"
+      no_log: true
+      loop:
+        - {name: awg-in.conf, content: "{{ awg_in_conf }}"}
+        - {name: server.yml, content: "{{ awg_server_yml }}"}
+        - {name: server.key, content: "{{ awg_server_key }}"}
+
+    - name: Sync Dockerfile and build context
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: preserve
+      loop:
+        - {src: "../Dockerfile", dest: "{{ deploy_path }}/Dockerfile"}
+        - {src: "../.dockerignore", dest: "{{ deploy_path }}/.dockerignore"}
+        - {src: "../container/", dest: "{{ deploy_path }}/container/"}
+
+    - name: Render docker-compose.yml
+      ansible.builtin.template:
+        src: docker-compose.yml.j2
+        dest: "{{ deploy_path }}/docker-compose.yml"
+        mode: "0644"
+
+    - name: Write non-secret Compose and runtime environments
+      ansible.builtin.copy:
+        content: "{{ lookup('env', 'PAVEL_WORK_RUNTIME_ENV') }}"
+        dest: "{{ deploy_path }}/{{ item }}"
+        mode: "0600"
+      loop:
+        - .env
+        - .env.runtime
+
+    - name: Write runtime secrets
+      ansible.builtin.copy:
+        content: "{{ item.value }}"
+        dest: "{{ deploy_path }}/secrets/{{ item.key | lower }}"
+        mode: "0600"
+      no_log: true
+      loop: "{{ (lookup('env', 'PAVEL_WORK_SECRETS_JSON') | from_json) | dict2items }}"
+
+    - name: Build and start gateway
+      ansible.builtin.shell: >-
+        {{ compose_command_result.stdout }} up -d --build
+        --force-recreate --remove-orphans
+      args:
+        chdir: "{{ deploy_path }}"
+        executable: /bin/bash
+      register: compose_up
+      changed_when: true
+
+    - name: Remove build context from the server
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ deploy_path }}/container"
+        - "{{ deploy_path }}/.dockerignore"
+
+    - name: Show deployment result
+      ansible.builtin.debug:
+        msg: >-
+          vpn-dispatcher is deployed at {{ deploy_path }} on {{ inventory_hostname }}
+          (compose + Dockerfile + env; build context removed after image build)

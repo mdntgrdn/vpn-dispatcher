@@ -1,0 +1,16 @@
+[tool.poetry]
+package-mode = false
+
+[project]
+name = "vpn-dispatcher"
+version = "0.1.0"
+description = "Single-container AWG ingress and policy-routed VPN gateway"
+requires-python = ">=3.12"
+dependencies = [
+    "ansible-core>=2.20,<3",
+    "PyYAML>=6,<7",
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
