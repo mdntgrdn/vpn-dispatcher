@@ -8,7 +8,7 @@ from pathlib import Path
 
 import yaml
 
-from container.common import env, require_env, run
+from container.common import enabled, env, require_env, run
 from container.egress.registry import plugins
 from container.egress.utils import delete_link
 
@@ -220,29 +220,35 @@ def write_xray_config() -> None:
             )
         if cidrs:
             rules.append({"type": "field", "ip": cidrs, "outboundTag": plugin.tag})
-    # Geo → direct: categories come from .env (defaults match common RU split).
-    direct_geosite = env("XRAY_DIRECT_GEOSITE") or env(
-        "XRAY_RU_GEOSITE", "category-ru"
-    )
-    direct_geoip = env("XRAY_DIRECT_GEOIP", "ru")
-    rules.extend(
-        [
-            {
-                "type": "field",
-                "domain": [f"geosite:{direct_geosite}"],
-                "outboundTag": "direct",
-            },
-            {
-                "type": "field",
-                "ip": [f"geoip:{direct_geoip}"],
-                "outboundTag": "direct",
-            },
-            {
-                "type": "field",
-                "network": "tcp,udp",
-                "outboundTag": default_tag,
-            },
-        ]
+    # Geo → direct: categories from .env. Master switch XRAY_DIRECT_GEO
+    # (default true). Set false/off to send all unmatched traffic to fallback.
+    if enabled("XRAY_DIRECT_GEO", True):
+        direct_geosite = (
+            env("XRAY_DIRECT_GEOSITE") or env("XRAY_RU_GEOSITE", "category-ru")
+        )
+        direct_geoip = env("XRAY_DIRECT_GEOIP", "ru")
+        if direct_geosite:
+            rules.append(
+                {
+                    "type": "field",
+                    "domain": [f"geosite:{direct_geosite}"],
+                    "outboundTag": "direct",
+                }
+            )
+        if direct_geoip:
+            rules.append(
+                {
+                    "type": "field",
+                    "ip": [f"geoip:{direct_geoip}"],
+                    "outboundTag": "direct",
+                }
+            )
+    rules.append(
+        {
+            "type": "field",
+            "network": "tcp,udp",
+            "outboundTag": default_tag,
+        }
     )
     marks = {"direct": require_env("MARK_DIRECT")}
     marks.update({plugin.tag: plugin.mark() for plugin in active_plugins})

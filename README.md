@@ -44,9 +44,9 @@ Deployed as one container that runs:
 
 Routing order when exits are enabled: **user policies** (Forti / Cisco / WG) →
 **configured GeoIP/GeoSite → direct WAN** → **AWG fallback** (or WAN if AWG out
-is off). Geo categories come from `.env` (`XRAY_DIRECT_GEOSITE`,
-`XRAY_DIRECT_GEOIP`; defaults are `category-ru` / `ru`). Each exit is independent
-and off by default.
+is off). Toggle with `XRAY_DIRECT_GEO` (default `true`); categories are
+`XRAY_DIRECT_GEOSITE` / `XRAY_DIRECT_GEOIP` (`category-ru` / `ru`). Each exit is
+independent and off by default.
 
 `HOST_NETWORK` in `.env` chooses how the container is networked and how AWG
 fallback is wired:
@@ -215,8 +215,10 @@ uplink) or WAN.
 Geo → direct is set in `.env`:
 
 ```dotenv
+XRAY_DIRECT_GEO=true
 XRAY_DIRECT_GEOSITE=category-ru
 XRAY_DIRECT_GEOIP=ru
+# Temporary test: XRAY_DIRECT_GEO=false — no RU split, all unmatched via AWG.
 ```
 
 Xray learns the domain from visible DNS/HTTP/TLS/QUIC. ECH and non-standard
