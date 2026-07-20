@@ -32,9 +32,10 @@ def _untrack(process: subprocess.Popen) -> None:
 
 
 def _vpn_worker(plugin: EgressPlugin) -> None:
-    # Forti SAML: a couple of starts (~1 min with the 30s pause), then stop.
+    # Forti SAML: a couple of starts, then park until wake file / reconnect.
     max_attempts = 2 if plugin.interactive_auth else None
     attempt = 0
+    wake = Path(f"/run/vpn-dispatcher/wake-{plugin.tag}")
     while not STOP.is_set():
         attempt += 1
         delay = 30 if plugin.interactive_auth else 5
@@ -58,13 +59,24 @@ def _vpn_worker(plugin: EgressPlugin) -> None:
             if STOP.is_set():
                 return
             if max_attempts is not None and attempt >= max_attempts:
+                wake.unlink(missing_ok=True)
                 print(
                     f"{plugin.display_name} exited with {return_code}; "
                     f"giving up after {max_attempts} attempts "
-                    "(run forti_reconnect)",
+                    f"(run forti_reconnect / touch {wake})",
                     flush=True,
                 )
-                return
+                while not STOP.is_set():
+                    if wake.exists():
+                        wake.unlink(missing_ok=True)
+                        attempt = 0
+                        print(
+                            f"{plugin.display_name} wake requested — retrying",
+                            flush=True,
+                        )
+                        break
+                    STOP.wait(2)
+                continue
             print(
                 f"{plugin.display_name} exited with {return_code}; "
                 f"retrying in {delay} seconds",
@@ -74,14 +86,25 @@ def _vpn_worker(plugin: EgressPlugin) -> None:
             if STOP.is_set():
                 return
             if max_attempts is not None and attempt >= max_attempts:
+                wake.unlink(missing_ok=True)
                 print(
                     f"{plugin.display_name} start failed: {exc}; "
                     f"giving up after {max_attempts} attempts "
-                    "(run forti_reconnect)",
+                    f"(run forti_reconnect / touch {wake})",
                     file=sys.stderr,
                     flush=True,
                 )
-                return
+                while not STOP.is_set():
+                    if wake.exists():
+                        wake.unlink(missing_ok=True)
+                        attempt = 0
+                        print(
+                            f"{plugin.display_name} wake requested — retrying",
+                            flush=True,
+                        )
+                        break
+                    STOP.wait(2)
+                continue
             print(
                 f"{plugin.display_name} start failed: {exc}; "
                 f"retrying in {delay} seconds",

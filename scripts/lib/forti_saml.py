@@ -46,23 +46,7 @@ def saml_listener_ready(settings: Settings, saml_port: str) -> bool:
         stderr=subprocess.DEVNULL,
         check=False,
     )
-    if result.returncode == 0:
-        return True
-    logs = subprocess.run(
-        [
-            *ssh_base(settings),
-            "docker",
-            "logs",
-            "--tail",
-            "80",
-            container_name(settings),
-        ],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-    )
-    return "Listening for SAML login" in (logs.stdout or "")
+    return result.returncode == 0
 
 
 def deliver_saml_id(settings: Settings, saml_port: str, saml_id: str) -> tuple[bool, str]:
@@ -101,9 +85,14 @@ sys.stdout.buffer.write(b"".join(chunks))
         stderr=subprocess.PIPE,
         check=False,
     )
-    body = (result.stdout or "") + (result.stderr or "")
+    # SSH banners (e.g. post-quantum warning) often land on stderr.
+    body = (result.stdout or "").strip() or (result.stderr or "").strip()
     if result.returncode == 0:
         return True, body[:500]
+    # Prefer the real traceback over ssh chatter.
+    err = result.stderr or ""
+    if "Traceback" in err:
+        body = err[err.index("Traceback") :]
     return False, body[:500] or f"exit {result.returncode}"
 
 
@@ -245,6 +234,28 @@ def reconnect(settings: Settings, *, open_browser: bool, timeout: int) -> int:
     killed = vpn_kill(settings, "openfortivpn")
     if killed != 0:
         return killed
+    # Wake the Forti worker if it parked after giving up on SAML.
+    wake = subprocess.run(
+        [
+            *ssh_base(settings),
+            "docker",
+            "exec",
+            container_name(settings),
+            "touch",
+            "/run/vpn-dispatcher/wake-forti",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if wake.returncode != 0:
+        detail = (wake.stderr or wake.stdout or "").strip()
+        print(
+            f"Warning: could not wake Forti worker: {detail or wake.returncode}",
+            file=sys.stderr,
+            flush=True,
+        )
     print(
         "Container stays up; Forti restart loop will respawn openfortivpn "
         "(up to 2 attempts, ~30s apart), then SAML is required again.",
